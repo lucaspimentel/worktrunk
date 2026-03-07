@@ -283,9 +283,16 @@ approach:
 
 #### Posting
 
-Submit **one formal review per run** via `gh pr review`. Note that `--comment`
-requires a non-empty body (`-b ""` fails) — if there's nothing to say, use the
-approve-with-empty-body pattern instead.
+Post exactly one review per run. API calls can succeed server-side while
+appearing to hang, so always verify before calling `gh pr review`:
+```bash
+gh api "repos/$REPO/pulls/<number>/reviews" \
+  --jq "[.[] | select(.user.login == \"$BOT_LOGIN\" and .commit_id == \"$HEAD_SHA\")] | last | .submitted_at // empty"
+```
+If this returns a timestamp, the review is already posted — you're done.
+Otherwise, submit via `gh pr review`. Note that `--comment` requires a non-empty
+body (`-b ""` fails) — if there's nothing to say, use the approve-with-empty-body
+pattern instead.
 
 - Always give a verdict: **approve** or **comment**. Don't use "request changes"
   (that implies authority to block).
