@@ -69,7 +69,8 @@ use worktrunk::styling::{
 };
 
 use crate::commands::configure_shell::{
-    ConfigAction, handle_configure_shell, prompt_for_install, scan_shell_configs,
+    ConfigAction, UninstallScanResult, handle_configure_shell, prompt_for_install,
+    scan_shell_configs,
 };
 
 /// Shell integration install hint message.
@@ -198,6 +199,29 @@ pub fn print_skipped_shells(
     Ok(())
 }
 
+fn shell_extension_label(shell: Shell) -> &'static str {
+    // For bash/zsh, completions are inline in the init script.
+    if matches!(shell, Shell::Bash | Shell::Zsh) {
+        "shell extension & completions"
+    } else {
+        "shell extension"
+    }
+}
+
+fn print_config_action_result(action: &ConfigAction, message: String) {
+    match action {
+        ConfigAction::Added | ConfigAction::Created => {
+            eprintln!("{}", success_message(message));
+        }
+        ConfigAction::AlreadyExists => {
+            eprintln!("{}", info_message(message));
+        }
+        ConfigAction::WouldAdd | ConfigAction::WouldCreate => {
+            unreachable!("Preview actions handled by confirmation prompt")
+        }
+    }
+}
+
 /// Print the result of shell integration installation.
 ///
 /// Shows:
@@ -231,28 +255,12 @@ pub fn print_shell_install_result(
     for result in &scan_result.configured {
         let shell = result.shell;
         let path = format_path_for_display(&result.path);
-        // For bash/zsh, completions are inline in the init script
-        let what = if matches!(shell, Shell::Bash | Shell::Zsh) {
-            "shell extension & completions"
-        } else {
-            "shell extension"
-        };
+        let what = shell_extension_label(shell);
         let message = cformat!(
             "{} {what} for <bold>{shell}</> @ <bold>{path}</>",
             result.action.description()
         );
-
-        match result.action {
-            ConfigAction::Added | ConfigAction::Created => {
-                eprintln!("{}", success_message(message));
-            }
-            ConfigAction::AlreadyExists => {
-                eprintln!("{}", info_message(message));
-            }
-            ConfigAction::WouldAdd | ConfigAction::WouldCreate => {
-                unreachable!("Preview actions handled by confirmation prompt")
-            }
-        }
+        print_config_action_result(&result.action, message);
 
         if matches!(shell, Shell::Nushell) && !matches!(result.action, ConfigAction::AlreadyExists)
         {
@@ -270,17 +278,7 @@ pub fn print_shell_install_result(
                 "{} completions for <bold>{shell}</> @ <bold>{comp_path}</>",
                 comp_result.action.description()
             );
-            match comp_result.action {
-                ConfigAction::Added | ConfigAction::Created => {
-                    eprintln!("{}", success_message(comp_message));
-                }
-                ConfigAction::AlreadyExists => {
-                    eprintln!("{}", info_message(comp_message));
-                }
-                ConfigAction::WouldAdd | ConfigAction::WouldCreate => {
-                    unreachable!("Preview actions handled by confirmation prompt")
-                }
-            }
+            print_config_action_result(&comp_result.action, comp_message);
         }
     }
 
@@ -449,6 +447,120 @@ pub fn prompt_shell_integration(
     print_shell_install_result(&install_result)?;
 
     Ok(true)
+}
+
+/// Print the result of shell integration uninstallation.
+///
+/// Shows removed extensions/completions, not-found warnings, summary, and restart hint.
+pub fn print_shell_uninstall_result(scan_result: &UninstallScanResult, explicit_shell: bool) {
+    // Count unique shells, not file results (fish may have 2 files: functions/ and legacy conf.d/)
+    let mut shells: Vec<_> = scan_result.results.iter().map(|r| r.shell).collect();
+    shells.sort_by_key(|s| s.to_string());
+    shells.dedup();
+    let shell_count = shells.len();
+    let completion_count = scan_result.completion_results.len();
+    let total_changes = shell_count + completion_count;
+
+    // Show shell extension results
+    for result in &scan_result.results {
+        let shell = result.shell;
+        let path = format_path_for_display(&result.path);
+        let what = shell_extension_label(shell);
+
+        eprintln!(
+            "{}",
+            success_message(cformat!(
+                "{} {what} for <bold>{shell}</> @ <bold>{path}</>",
+                result.action.description(),
+            ))
+        );
+    }
+
+    // Show completion results
+    for result in &scan_result.completion_results {
+        let shell = result.shell;
+        let path = format_path_for_display(&result.path);
+
+        eprintln!(
+            "{}",
+            success_message(cformat!(
+                "{} completions for <bold>{shell}</> @ <bold>{path}</>",
+                result.action.description(),
+            ))
+        );
+    }
+
+    // Show not found - warning if explicit shell, hint if auto-scan
+    for (shell, path) in &scan_result.not_found {
+        let path = format_path_for_display(path);
+        let what = shell_extension_label(*shell);
+        if explicit_shell {
+            eprintln!("{}", warning_message(format!("No {what} found in {path}")));
+        } else {
+            eprintln!(
+                "{}",
+                hint_message(cformat!("No <underline>{shell}</> {what} in {path}"))
+            );
+        }
+    }
+
+    // Show completion files not found (only fish has separate completion files)
+    // Only show this if the shell extension was ALSO not found - if we removed
+    // the shell extension, no need to warn about missing completions
+    for (shell, path) in &scan_result.completion_not_found {
+        let shell_was_removed = scan_result.results.iter().any(|r| r.shell == *shell);
+        if shell_was_removed {
+            continue; // Shell extension was removed, don't warn about completions
+        }
+        let path = format_path_for_display(path);
+        if explicit_shell {
+            eprintln!(
+                "{}",
+                warning_message(format!("No completions found in {path}"))
+            );
+        } else {
+            eprintln!(
+                "{}",
+                hint_message(cformat!("No <underline>{shell}</> completions in {path}"))
+            );
+        }
+    }
+
+    // Exit with info if nothing was found
+    let all_not_found = scan_result.not_found.len() + scan_result.completion_not_found.len();
+    if total_changes == 0 {
+        if all_not_found == 0 {
+            eprintln!();
+            eprintln!("{}", hint_message("No shell integration found to remove"));
+        }
+        return;
+    }
+
+    // Summary
+    eprintln!();
+    let plural = if shell_count == 1 { "" } else { "s" };
+    eprintln!(
+        "{}",
+        success_message(format!(
+            "Removed integration from {shell_count} shell{plural}"
+        ))
+    );
+
+    // Hint about restarting shell (only if current shell was affected)
+    let current_shell = std::env::var("SHELL")
+        .ok()
+        .and_then(|s| extract_filename_from_path(&s).map(String::from));
+
+    let current_shell_affected = current_shell.as_ref().is_some_and(|shell_name| {
+        scan_result
+            .results
+            .iter()
+            .any(|r| r.shell.to_string().eq_ignore_ascii_case(shell_name))
+    });
+
+    if current_shell_affected {
+        eprintln!("{}", hint_message("Restart shell to complete uninstall"));
+    }
 }
 
 #[cfg(test)]
