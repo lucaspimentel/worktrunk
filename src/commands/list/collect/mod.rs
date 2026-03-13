@@ -228,12 +228,17 @@ pub enum ShowConfig {
 /// The `skip_expensive_for_stale` parameter enables batch-fetching ahead/behind counts and
 /// skipping expensive merge-base operations for branches far behind the default branch.
 /// This dramatically improves performance for repos with many stale branches.
+///
+/// When `collect_deadline` is `Some`, drain stops at the deadline and returns partial data
+/// silently (budget-based truncation is expected). When `None`, uses the default
+/// [`DRAIN_TIMEOUT`](results::DRAIN_TIMEOUT) and shows a user-facing warning on timeout.
 pub fn collect(
     repo: &Repository,
     show_config: ShowConfig,
     show_progress: bool,
     render_table: bool,
     skip_expensive_for_stale: bool,
+    collect_deadline: Option<std::time::Instant>,
 ) -> anyhow::Result<Option<super::model::ListData>> {
     use super::progressive_table::ProgressiveTable;
     worktrunk::shell_exec::trace_instant("List collect started");
@@ -808,11 +813,14 @@ pub fn collect(
     let mut first_result_traced = false;
 
     // Drain task results with conditional progressive rendering
+    let drain_deadline =
+        collect_deadline.unwrap_or_else(|| std::time::Instant::now() + results::DRAIN_TIMEOUT);
     let drain_outcome = drain_results(
         rx,
         &mut all_items,
         &mut errors,
         &expected_results,
+        drain_deadline,
         |item_idx, item, ctx| {
             // Trace first result arrival
             if !first_result_traced {
@@ -822,9 +830,7 @@ pub fn collect(
 
             // Compute/recompute status symbols as data arrives (both modes).
             // This is idempotent and updates status as new data (like upstream) arrives.
-            if let Some(ref target) = integration_target {
-                ctx.apply_to(item, target.as_str());
-            }
+            ctx.apply_to(item, integration_target.as_deref());
 
             // Progressive mode only: update UI
             if let Some(ref mut table) = progressive_table {
@@ -867,11 +873,14 @@ pub fn collect(
     );
     worktrunk::shell_exec::trace_instant("All results drained");
 
-    // Handle timeout if it occurred
-    if let DrainOutcome::TimedOut {
-        received_count,
-        items_with_missing,
-    } = drain_outcome
+    // Handle timeout if it occurred.
+    // Budget-based deadlines (collect_deadline) are intentional truncation — don't warn.
+    // Only warn for the default DRAIN_TIMEOUT (120s), which indicates a hung command.
+    if collect_deadline.is_none()
+        && let DrainOutcome::TimedOut {
+            received_count,
+            items_with_missing,
+        } = drain_outcome
     {
         // Warning: what happened + gutter showing which results are missing
         let mut diag = format!(
@@ -913,9 +922,7 @@ pub fn collect(
         {
             // Use default context - no tasks ran, so no conflict/status info
             let ctx = StatusContext::default();
-            if let Some(ref target) = integration_target {
-                ctx.apply_to(item, target.as_str());
-            }
+            ctx.apply_to(item, integration_target.as_deref());
         }
     }
 
@@ -1201,10 +1208,9 @@ pub fn populate_item(
         std::slice::from_mut(item),
         &mut errors,
         &expected_results,
+        std::time::Instant::now() + results::DRAIN_TIMEOUT,
         |_item_idx, item, ctx| {
-            if let Some(ref t) = target {
-                ctx.apply_to(item, t);
-            }
+            ctx.apply_to(item, target.as_deref());
         },
     );
 
