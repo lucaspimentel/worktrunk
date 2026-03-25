@@ -97,6 +97,9 @@ stage = "all"
 [merge]
 squash = true
 
+[step.copy-ignored]
+exclude = [".conductor/"]
+
 [post-create]
 run = "npm install"
 
@@ -1583,6 +1586,42 @@ squash = false
 }
 
 #[test]
+fn test_copy_ignored_config_merges_global_and_project() {
+    let project_id = "github.com/user/repo";
+    let config = UserConfig::load_from_str(
+        r#"
+[step.copy-ignored]
+exclude = [".conductor/", ".entire/"]
+
+[projects."github.com/user/repo".step.copy-ignored]
+exclude = [".repo-local/", ".entire/"]
+"#,
+    )
+    .unwrap();
+
+    let expected_global = vec![".conductor/".to_string(), ".entire/".to_string()];
+    let expected_merged = vec![
+        ".conductor/".to_string(),
+        ".entire/".to_string(),
+        ".repo-local/".to_string(),
+    ];
+
+    assert_eq!(config.copy_ignored(None).exclude, expected_global);
+    assert_eq!(
+        config.copy_ignored(Some(project_id)).exclude,
+        expected_merged.clone()
+    );
+    assert_eq!(
+        config
+            .resolved(Some(project_id))
+            .step
+            .copy_ignored()
+            .exclude,
+        expected_merged
+    );
+}
+
+#[test]
 fn test_deprecated_commit_generation_format_serde() {
     // Test old format: [commit-generation] is still parsed for backward compatibility
     let content = r#"
@@ -2065,7 +2104,8 @@ fn test_valid_user_config_keys_all_deserialize() {
             "worktree-path" => {
                 scalar_lines.push(format!("{key} = \"test-value\""));
             }
-            "list" | "commit" | "merge" | "switch" | "select" | "commit-generation" | "aliases" => {
+            "list" | "commit" | "merge" | "switch" | "step" | "select" | "commit-generation"
+            | "aliases" => {
                 // Table sections with minimal content
                 table_lines.push(format!("[{key}]"));
             }
